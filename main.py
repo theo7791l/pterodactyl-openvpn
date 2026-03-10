@@ -22,8 +22,8 @@ from config import (
     KEYS_DIR, CLIENTS_DIR, CONF_DIR
 )
 
-# Binaire wireguard-go statique (P3TERX builder)
-WG_GO_URL = "https://github.com/P3TERX/wireguard-go-builder/releases/download/0.0.20231212/wireguard-go-linux-amd64.tar.gz"
+# URL correcte verifiee sur github.com/P3TERX/wireguard-go-builder/releases
+WG_GO_URL = "https://github.com/P3TERX/wireguard-go-builder/releases/download/0.0.20230223/wireguard-go-linux-amd64.tar.gz"
 WG_GO_TGZ = f"{WORKDIR}/wireguard-go.tar.gz"
 WG_GO_BIN = f"{WORKDIR}/wireguard-go"
 
@@ -34,18 +34,27 @@ def download_wg_go():
     if os.path.isfile(WG_GO_BIN) and os.access(WG_GO_BIN, os.X_OK):
         print("[OK] wireguard-go deja present.")
         return
-    print("[~] Telechargement de wireguard-go...")
-    urllib.request.urlretrieve(WG_GO_URL, WG_GO_TGZ)
+    print("[~] Telechargement de wireguard-go (linux-amd64)...")
+    # Suivre les redirections GitHub
+    opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+    with opener.open(WG_GO_URL, timeout=30) as resp, open(WG_GO_TGZ, "wb") as f:
+        f.write(resp.read())
+    print("[OK] Telechargement OK, extraction...")
     with tarfile.open(WG_GO_TGZ, "r:gz") as tar:
+        extracted = False
         for member in tar.getmembers():
-            if member.name.endswith("wireguard-go") or member.name == "wireguard-go":
-                member.name = os.path.basename(member.name)
+            print(f"    membre : {member.name}")
+            if os.path.basename(member.name) == "wireguard-go":
+                member.name = "wireguard-go"
                 tar.extract(member, WORKDIR)
+                extracted = True
                 break
-    if os.path.isfile(WG_GO_TGZ):
-        os.remove(WG_GO_TGZ)
+        if not extracted:
+            print("[!] Binaire wireguard-go introuvable dans l'archive.")
+            sys.exit(1)
+    os.remove(WG_GO_TGZ)
     os.chmod(WG_GO_BIN, os.stat(WG_GO_BIN).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    print("[OK] wireguard-go telecharge et extrait.")
+    print("[OK] wireguard-go extrait et pret.")
 
 
 def wg_genkey():
@@ -117,7 +126,7 @@ def write_client_conf(server_ip):
     os.makedirs(CLIENTS_DIR, exist_ok=True)
     out = f"{CLIENTS_DIR}/client1.conf"
     if os.path.isfile(out):
-        print(f"[OK] Config client deja presente.")
+        print("[OK] Config client deja presente.")
         return
     cli_priv = read(CLIENT_PRIVKEY_FILE)
     srv_pub  = read(SERVER_PUBKEY_FILE)
@@ -135,7 +144,7 @@ def write_client_conf(server_ip):
     with open(out, "w") as f:
         f.write(conf)
     print(f"[OK] Config client : {out}")
-    print(f"     --> Telecharge clients/client1.conf depuis le panel et importe dans WireGuard.")
+    print("     --> Telecharge clients/client1.conf depuis le panel et importe dans WireGuard.")
 
 
 def setup():
@@ -149,16 +158,13 @@ def setup():
 
 
 def configure_via_uapi(srv_priv, cli_pub):
-    """Configure wireguard-go via le socket UAPI Unix."""
     uapi_sock = f"/tmp/wireguard/utun{os.getpid()}.sock"
-    # Attendre que le socket soit disponible
-    for _ in range(10):
+    for _ in range(20):
         if os.path.exists(uapi_sock):
             break
         time.sleep(0.5)
     else:
         raise FileNotFoundError(f"Socket UAPI introuvable : {uapi_sock}")
-
     priv_hex = base64.b64decode(srv_priv).hex()
     pub_hex  = base64.b64decode(cli_pub).hex()
     cmd = (
@@ -167,8 +173,7 @@ def configure_via_uapi(srv_priv, cli_pub):
         f"listen_port={VPN_PORT}\n"
         f"replace_peers=true\n"
         f"public_key={pub_hex}\n"
-        f"allowed_ip=10.8.0.2/32\n"
-        f"\n"
+        f"allowed_ip=10.8.0.2/32\n\n"
     )
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.connect(uapi_sock)
@@ -180,7 +185,7 @@ def configure_via_uapi(srv_priv, cli_pub):
 
 
 def start_vpn():
-    print(f"[~] Demarrage wireguard-go...")
+    print("[~] Demarrage wireguard-go...")
     env = os.environ.copy()
     env["WG_PROCESS_FOREGROUND"] = "1"
     iface = f"utun{os.getpid()}"
@@ -190,18 +195,16 @@ def start_vpn():
         stdout=sys.stdout,
         stderr=sys.stderr
     )
-    time.sleep(2)
+    time.sleep(3)
     if proc.poll() is not None:
         print("[!] wireguard-go a plante au demarrage.")
         sys.exit(1)
-
     try:
         configure_via_uapi(read(SERVER_PRIVKEY_FILE), read(CLIENT_PUBKEY_FILE))
     except Exception as e:
         print(f"[!] Erreur UAPI : {e}")
         proc.terminate()
         sys.exit(1)
-
     return proc
 
 
