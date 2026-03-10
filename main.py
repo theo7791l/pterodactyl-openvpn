@@ -1,225 +1,234 @@
 #!/usr/bin/env python3
 """
-main.py - VPN WireGuard via boringtun (Cloudflare)
-100% userspace, zero /dev/net/tun, zero apt, zero sudo.
-boringtun agit comme un RELAIS UDP : il ecoute sur VPN_PORT
-et fait le chiffrement/dechiffrement WireGuard en espace utilisateur.
+main.py - Proxy SOCKS5 chiffre (TLS) en Python pur
+Zero binaire externe, zero /dev/net/tun, zero apt, zero sudo.
+Tout tourne dans /home/container sur le port UDP/TCP configure.
+
+Cote serveur : ecoute sur VPN_PORT en TLS
+Cote client  : configure un proxy SOCKS5 dans ton navigateur/OS
+               ou utilise Proxifier/SocksCap sur Windows
 """
 
 import os
 import sys
+import ssl
 import time
+import socket
 import signal
+import threading
 import subprocess
-import urllib.request
-import tarfile
-import stat
-import base64
+import ipaddress
+from pathlib import Path
 
-from config import (
-    VPN_PORT, WORKDIR, WG_CONF,
-    SERVER_PRIVKEY_FILE, SERVER_PUBKEY_FILE,
-    CLIENT_PRIVKEY_FILE, CLIENT_PUBKEY_FILE,
-    KEYS_DIR, CLIENTS_DIR, CONF_DIR
-)
+from config import VPN_PORT, WORKDIR, CERT_FILE, KEY_FILE, CLIENTS_DIR
 
-# boringtun-cli : binaire statique musl (zero dep, zero TUN kernel)
-BORINGTUN_URL = "https://github.com/cloudflare/boringtun/releases/download/boringtun-cli-v0.5.2/boringtun-cli-x86_64-unknown-linux-musl.tar.gz"
-BORINGTUN_TGZ = f"{WORKDIR}/boringtun.tar.gz"
-BORINGTUN_BIN = f"{WORKDIR}/boringtun-cli"
-
-vpn_proc = None
+vpn_running = True
 
 
-def download_boringtun():
-    if os.path.isfile(BORINGTUN_BIN) and os.access(BORINGTUN_BIN, os.X_OK):
-        print("[OK] boringtun-cli deja present.")
+# ─────────────────────────────────────────────
+#  Generation du certificat TLS auto-signe
+# ─────────────────────────────────────────────
+
+def generate_cert():
+    if Path(CERT_FILE).exists() and Path(KEY_FILE).exists():
+        print("[OK] Certificat TLS deja present.")
         return
-    print("[~] Telechargement de boringtun-cli (Cloudflare, musl statique)...")
-    opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
-    with opener.open(BORINGTUN_URL, timeout=60) as resp, open(BORINGTUN_TGZ, "wb") as f:
-        f.write(resp.read())
-    print("[OK] Telechargement OK, extraction...")
-    with tarfile.open(BORINGTUN_TGZ, "r:gz") as tar:
-        extracted = False
-        for member in tar.getmembers():
-            print(f"    membre : {member.name}")
-            if os.path.basename(member.name) in ("boringtun-cli", "boringtun"):
-                member.name = os.path.basename(member.name)
-                tar.extract(member, WORKDIR)
-                extracted = True
-                # renommer en boringtun-cli si besoin
-                extracted_path = f"{WORKDIR}/{os.path.basename(member.name)}"
-                if not os.path.isfile(BORINGTUN_BIN):
-                    os.rename(extracted_path, BORINGTUN_BIN)
-                break
-        if not extracted:
-            print("[!] Binaire boringtun introuvable dans l'archive.")
-            sys.exit(1)
-    if os.path.isfile(BORINGTUN_TGZ):
-        os.remove(BORINGTUN_TGZ)
-    os.chmod(BORINGTUN_BIN, os.stat(BORINGTUN_BIN).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    print("[OK] boringtun-cli pret.")
+    print("[~] Generation du certificat TLS auto-signe...")
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime
 
-
-def wg_genkey():
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-    priv = X25519PrivateKey.generate()
-    priv_b64 = base64.b64encode(priv.private_bytes_raw()).decode()
-    pub_b64  = base64.b64encode(priv.public_key().public_bytes_raw()).decode()
-    return priv_b64, pub_b64
-
-
-def generate_keys():
-    os.makedirs(KEYS_DIR, exist_ok=True)
-    if os.path.isfile(SERVER_PRIVKEY_FILE):
-        print("[OK] Cles deja generees.")
-        return
-    print("[~] Generation des cles WireGuard...")
-    srv_priv, srv_pub = wg_genkey()
-    cli_priv, cli_pub = wg_genkey()
-    for path, content in [
-        (SERVER_PRIVKEY_FILE, srv_priv),
-        (SERVER_PUBKEY_FILE,  srv_pub),
-        (CLIENT_PRIVKEY_FILE, cli_priv),
-        (CLIENT_PUBKEY_FILE,  cli_pub),
-    ]:
-        with open(path, "w") as f:
-            f.write(content)
-        os.chmod(path, 0o600)
-    print("[OK] Cles generees.")
-
-
-def read(path):
-    with open(path) as f:
-        return f.read().strip()
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, u"proxy-server"),
+        ])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.utcnow())
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
+            .sign(key, hashes.SHA256())
+        )
+        os.makedirs(os.path.dirname(CERT_FILE), exist_ok=True)
+        with open(KEY_FILE, "wb") as f:
+            f.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption()
+            ))
+        with open(CERT_FILE, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        os.chmod(KEY_FILE, 0o600)
+        print("[OK] Certificat TLS genere.")
+    except Exception as e:
+        print(f"[!] Erreur generation certificat : {e}")
+        sys.exit(1)
 
 
 def detect_ip():
+    import urllib.request
     try:
         with urllib.request.urlopen("https://api.ipify.org", timeout=5) as r:
             ip = r.read().decode().strip()
             print(f"[OK] IP publique : {ip}")
             return ip
     except Exception:
-        print("[!] Impossible de detecter l'IP publique.")
-        sys.exit(1)
+        return "<IP_SERVEUR>"
 
 
-def write_server_conf():
-    os.makedirs(CONF_DIR, exist_ok=True)
-    if os.path.isfile(WG_CONF):
-        print("[OK] Config serveur deja presente.")
-        return
-    srv_priv = read(SERVER_PRIVKEY_FILE)
-    cli_pub  = read(CLIENT_PUBKEY_FILE)
-    conf = (
-        f"[Interface]\n"
-        f"PrivateKey = {srv_priv}\n"
-        f"ListenPort = {VPN_PORT}\n\n"
-        f"[Peer]\n"
-        f"PublicKey = {cli_pub}\n"
-        f"AllowedIPs = 10.8.0.2/32\n"
-    )
-    with open(WG_CONF, "w") as f:
-        f.write(conf)
-    os.chmod(WG_CONF, 0o600)
-    print(f"[OK] Config serveur : {WG_CONF}")
-
-
-def write_client_conf(server_ip):
+def write_client_info(server_ip):
     os.makedirs(CLIENTS_DIR, exist_ok=True)
-    out = f"{CLIENTS_DIR}/client1.conf"
-    if os.path.isfile(out):
-        print("[OK] Config client deja presente.")
-        return
-    cli_priv = read(CLIENT_PRIVKEY_FILE)
-    srv_pub  = read(SERVER_PUBKEY_FILE)
-    conf = (
-        f"[Interface]\n"
-        f"PrivateKey = {cli_priv}\n"
-        f"Address = 10.8.0.2/24\n"
-        f"DNS = 1.1.1.1, 8.8.8.8\n\n"
-        f"[Peer]\n"
-        f"PublicKey = {srv_pub}\n"
-        f"Endpoint = {server_ip}:{VPN_PORT}\n"
-        f"AllowedIPs = 0.0.0.0/0\n"
-        f"PersistentKeepalive = 25\n"
+    out = f"{CLIENTS_DIR}/connexion.txt"
+    info = (
+        f"=== Infos de connexion proxy ===\n"
+        f"\n"
+        f"Type    : SOCKS5 sur TLS\n"
+        f"Serveur : {server_ip}\n"
+        f"Port    : {VPN_PORT}\n"
+        f"\n"
+        f"=== Comment se connecter ===\n"
+        f"\n"
+        f"Option 1 - Proxifier / SocksCap (Windows) :\n"
+        f"  Ajoute un serveur proxy : {server_ip}:{VPN_PORT} type SOCKS5\n"
+        f"\n"
+        f"Option 2 - Firefox :\n"
+        f"  Parametres > Reseau > Proxy manuel\n"
+        f"  Hote SOCKS : {server_ip}  Port : {VPN_PORT}  Type : SOCKS5\n"
+        f"\n"
+        f"Option 3 - curl (test) :\n"
+        f"  curl --socks5 {server_ip}:{VPN_PORT} https://api.ipify.org\n"
+        f"\n"
+        f"Le certificat TLS auto-signe est dans : conf/cert.pem\n"
+        f"Accepte-le dans ton client si demande.\n"
     )
     with open(out, "w") as f:
-        f.write(conf)
-    print(f"[OK] Config client : {out}")
-    print("     --> Telecharge clients/client1.conf depuis le panel et importe dans WireGuard.")
+        f.write(info)
+    print(f"[OK] Infos client ecrites : {out}")
 
 
-def setup():
-    print("=== Setup VPN boringtun (zero apt/sudo/TUN) ===")
-    download_boringtun()
-    generate_keys()
+# ─────────────────────────────────────────────
+#  Serveur SOCKS5
+# ─────────────────────────────────────────────
+
+def socks5_handshake(client):
+    """Handshake SOCKS5 (RFC 1928) sans authentification."""
+    data = client.recv(262)
+    if not data or data[0] != 0x05:
+        return None, None
+    # Reponse : pas d'auth
+    client.sendall(b"\x05\x00")
+    # Lire la requete
+    data = client.recv(4)
+    if len(data) < 4 or data[1] != 0x01:  # 0x01 = CONNECT
+        client.sendall(b"\x05\x07\x00\x01" + b"\x00" * 6)
+        return None, None
+    atyp = data[3]
+    if atyp == 0x01:  # IPv4
+        addr = socket.inet_ntoa(client.recv(4))
+    elif atyp == 0x03:  # Domaine
+        length = client.recv(1)[0]
+        addr = client.recv(length).decode()
+    elif atyp == 0x04:  # IPv6
+        addr = str(ipaddress.IPv6Address(client.recv(16)))
+    else:
+        return None, None
+    port = int.from_bytes(client.recv(2), "big")
+    return addr, port
+
+
+def relay(src, dst):
+    """Relaie les donnees entre deux sockets."""
+    try:
+        while True:
+            data = src.recv(4096)
+            if not data:
+                break
+            dst.sendall(data)
+    except Exception:
+        pass
+    finally:
+        for s in (src, dst):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def handle_client(client_sock, addr):
+    try:
+        host, port = socks5_handshake(client_sock)
+        if not host:
+            client_sock.close()
+            return
+        # Connexion vers la destination
+        remote = socket.create_connection((host, port), timeout=10)
+        # Reponse succes SOCKS5
+        client_sock.sendall(
+            b"\x05\x00\x00\x01" +
+            socket.inet_aton("0.0.0.0") +
+            (0).to_bytes(2, "big")
+        )
+        # Relay bidirectionnel
+        t = threading.Thread(target=relay, args=(remote, client_sock), daemon=True)
+        t.start()
+        relay(client_sock, remote)
+    except Exception as e:
+        try:
+            client_sock.close()
+        except Exception:
+            pass
+
+
+def start_server():
+    generate_cert()
     server_ip = detect_ip()
-    write_server_conf()
-    write_client_conf(server_ip)
-    print("=== Setup termine ! ===")
+    write_client_info(server_ip)
 
+    # SSL context
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
-def start_vpn():
-    """
-    Lance boringtun en mode foreground.
-    boringtun-cli <iface> --foreground
-    Il lit la config depuis les variables d'env WG_* ou via UAPI socket.
-    On passe la cle privee via stdin/env et le port via --listen-port.
-    """
-    print(f"[~] Demarrage boringtun sur port {VPN_PORT} UDP...")
-    srv_priv = read(SERVER_PRIVKEY_FILE)
-    cli_pub  = read(CLIENT_PUBKEY_FILE)
+    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    raw_sock.bind(("0.0.0.0", VPN_PORT))
+    raw_sock.listen(50)
 
-    env = os.environ.copy()
-    env["WG_QUICK_USERSPACE_IMPLEMENTATION"] = BORINGTUN_BIN
-    env["LOG_LEVEL"] = "info"
+    server_sock = ctx.wrap_socket(raw_sock, server_side=True)
+    print(f"[OK] Proxy SOCKS5+TLS en ecoute sur 0.0.0.0:{VPN_PORT}")
+    print(f"     Consulte clients/connexion.txt pour les infos de connexion.")
 
-    # boringtun-cli <private_key> <peer_public_key> --foreground --listen-port <port>
-    cmd = [
-        BORINGTUN_BIN,
-        srv_priv,       # cle privee du serveur
-        cli_pub,        # cle publique du peer (client)
-        "--foreground",
-        "--listen-port", str(VPN_PORT),
-        "--log",
-    ]
-
-    proc = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=sys.stdout,
-        stderr=sys.stderr
-    )
-    time.sleep(2)
-    if proc.poll() is not None:
-        print("[!] boringtun a plante au demarrage.")
-        sys.exit(1)
-    print(f"[OK] boringtun actif sur le port {VPN_PORT} UDP (PID {proc.pid}).")
-    return proc
+    while vpn_running:
+        try:
+            client, addr = server_sock.accept()
+            t = threading.Thread(target=handle_client, args=(client, addr), daemon=True)
+            t.start()
+        except ssl.SSLError:
+            pass
+        except Exception as e:
+            if vpn_running:
+                print(f"[!] Erreur acceptation : {e}")
 
 
 def handle_signal(signum, frame):
+    global vpn_running
     print("\n[~] Arret...")
-    if vpn_proc and vpn_proc.poll() is None:
-        vpn_proc.terminate()
-        vpn_proc.wait()
+    vpn_running = False
     sys.exit(0)
 
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
-
-    if not os.path.isfile(WG_CONF):
-        setup()
-
-    vpn_proc = start_vpn()
-
-    while True:
-        ret = vpn_proc.wait()
-        print(f"[!] VPN arrete (code {ret}). Redemarrage dans 5s...")
-        time.sleep(5)
-        vpn_proc = start_vpn()
+    print("=== Proxy SOCKS5+TLS (zero TUN, zero apt, zero binaire) ===")
+    start_server()
