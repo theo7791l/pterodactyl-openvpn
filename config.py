@@ -1,11 +1,11 @@
 # =============================================================
-#  Configuration OpenVPN – modifie ces valeurs avant de lancer
+#  Configuration OpenVPN – prête à l'emploi, rien à modifier
 # =============================================================
 
 import os
 
 # Port UDP exposé dans le panel Pterodactyl
-VPN_PORT = int(os.environ.get("VPN_PORT", 1194))
+VPN_PORT = int(os.environ.get("VPN_PORT", 40739))
 
 # Protocole (udp recommandé)
 VPN_PROTO = os.environ.get("VPN_PROTO", "udp")
