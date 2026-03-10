@@ -1,35 +1,25 @@
 # pterodactyl-openvpn (WireGuard userspace)
 
-Serveur VPN WireGuard en **userspace** (wireguard-go), conçu pour tourner sur un panel Pterodactyl **sans `/dev/net/tun`** ni droits noyau spéciaux.
+Serveur VPN WireGuard **100% userspace**, sans `apt`, sans `sudo`, sans `/dev/net/tun`.
+Tout tourne dans `/home/container`.
 
-## Prérequis
+## Panel Pterodactyl
 
-- Egg Python 3.11+ sur Pterodactyl
-- Un port UDP exposé (par défaut : **40739**)
-- Accès `apt-get` dans le conteneur (pour installer `wireguard-tools` et `iproute2`)
-
-## Démarrage
-
-Dans le panel :
 - **Git Repo** : `https://github.com/theo7791l/pterodactyl-openvpn`
 - **Branch** : `main`
 - **App PY File** : `main.py`
+- **Requirements File** : `requirements.txt`
 - **Docker Image** : Python 3.11
+- **Port** : `40739 UDP`
 
-Lancer le serveur → tout s'installe automatiquement au premier démarrage.
+## Premier demarrage
 
-## Récupérer le fichier client
+Tout est automatique :
+1. Telechargement de `wireguard-go` dans `/home/container`
+2. Generation des cles via Python (`cryptography`)
+3. Ecriture des configs serveur + client
+4. Demarrage du VPN
 
-Après le premier démarrage, télécharge le fichier `clients/client1.conf` depuis le panel et importe-le dans ton client WireGuard (Windows, Android, iOS).
+## Recuperer le fichier client
 
-## Architecture
-
-```
-/home/container/
-├── main.py           # Point d'entrée + setup + watchdog
-├── config.py         # Port, chemins, réseau
-├── wireguard-go      # Binaire userspace (téléchargé auto)
-├── conf/wg0.conf     # Config serveur WireGuard
-├── keys/             # Clés serveur + client
-└── clients/          # Fichier client1.conf à télécharger
-```
+Telecharge `clients/client1.conf` depuis le panel et importe-le dans **WireGuard** (Windows/Android/iOS).

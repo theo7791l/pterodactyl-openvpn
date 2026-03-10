@@ -1,2 +1,1 @@
-# Aucune dépendance Python externe requise.
-# wireguard-go est téléchargé automatiquement au premier démarrage.
+cryptography==42.0.8
