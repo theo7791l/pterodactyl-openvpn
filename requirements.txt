@@ -1,4 +1,2 @@
-# Pas de dépendances externes obligatoires.
-# Tout est géré via la stdlib Python + les binaires système (openvpn, easy-rsa).
-# Ajoute ici des paquets si tu étends le projet :
-# requests==2.31.0
+# Aucune dépendance Python externe requise.
+# wireguard-go est téléchargé automatiquement au premier démarrage.

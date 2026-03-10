@@ -1,66 +1,35 @@
-# pterodactyl-openvpn
+# pterodactyl-openvpn (WireGuard userspace)
 
-Installation et lancement automatique d'un serveur OpenVPN depuis un panel Pterodactyl, entièrement piloté par Python.
+Serveur VPN WireGuard en **userspace** (wireguard-go), conçu pour tourner sur un panel Pterodactyl **sans `/dev/net/tun`** ni droits noyau spéciaux.
 
 ## Prérequis
 
-- Un serveur Pterodactyl avec un egg Python (3.10+)
-- Un port UDP exposé (ex: 1194)
-- `/dev/net/tun` disponible dans le conteneur (sinon voir section Dépannage)
-- `openvpn` installé dans l'image Docker de l'egg (ou utilisez `setup.py` pour l'installer via pip/subprocess)
+- Egg Python 3.11+ sur Pterodactyl
+- Un port UDP exposé (par défaut : **40739**)
+- Accès `apt-get` dans le conteneur (pour installer `wireguard-tools` et `iproute2`)
 
-## Structure
+## Démarrage
+
+Dans le panel :
+- **Git Repo** : `https://github.com/theo7791l/pterodactyl-openvpn`
+- **Branch** : `main`
+- **App PY File** : `main.py`
+- **Docker Image** : Python 3.11
+
+Lancer le serveur → tout s'installe automatiquement au premier démarrage.
+
+## Récupérer le fichier client
+
+Après le premier démarrage, télécharge le fichier `clients/client1.conf` depuis le panel et importe-le dans ton client WireGuard (Windows, Android, iOS).
+
+## Architecture
 
 ```
-pteroducktyl-openvpn/
-├── main.py           # Point d'entrée principal (lanceur Pterodactyl)
-├── setup.py          # Installation d'OpenVPN + génération des certificats
-├── config.py         # Configuration (port, protocole, réseau VPN, DNS...)
-├── requirements.txt  # Dépendances Python
-└── README.md
+/home/container/
+├── main.py           # Point d'entrée + setup + watchdog
+├── config.py         # Port, chemins, réseau
+├── wireguard-go      # Binaire userspace (téléchargé auto)
+├── conf/wg0.conf     # Config serveur WireGuard
+├── keys/             # Clés serveur + client
+└── clients/          # Fichier client1.conf à télécharger
 ```
-
-## Utilisation
-
-### 1. Configuration
-
-Modifie `config.py` selon tes besoins :
-
-```python
-VPN_PORT = 1194       # Port UDP ouvert sur le panel
-VPN_PROTO = "udp"
-VPN_SUBNET = "10.8.0.0"
-VPN_MASK = "255.255.255.0"
-DNS1 = "1.1.1.1"
-DNS2 = "8.8.8.8"
-SERVER_IP = ""        # Laisse vide pour auto-détection
-```
-
-### 2. Démarrage
-
-Dans le panel Pterodactyl, définis la commande de démarrage :
-```
-python main.py
-```
-
-La première exécution lance `setup.py` automatiquement (installation + génération PKI).
-Les suivantes relancent directement OpenVPN.
-
-### 3. Récupérer un fichier client `.ovpn`
-
-Après le premier démarrage, le fichier `client.ovpn` est généré dans `/home/container/clients/`.
-
-## Dépannage
-
-### `/dev/net/tun` absent
-
-Si tu vois :
-```
-Cannot open TUN/TAP dev /dev/net/tun: No such file or directory
-```
-
-Demande à l'admin du nœud Pterodactyl d'activer le device `/dev/net/tun` et la cap `NET_ADMIN` pour le conteneur. Ce n'est pas réglable depuis Python seul.
-
-### OpenVPN non trouvé
-
-`setup.py` tente de l'installer via `apt-get` dans le conteneur. Si `apt` n'est pas disponible, utilise une image Docker qui inclut `openvpn`.

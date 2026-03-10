@@ -1,5 +1,5 @@
 # =============================================================
-#  Configuration OpenVPN – prête à l'emploi, rien à modifier
+#  Configuration WireGuard – prête à l'emploi, rien à modifier
 # =============================================================
 
 import os
@@ -7,23 +7,13 @@ import os
 # Port UDP exposé dans le panel Pterodactyl
 VPN_PORT = int(os.environ.get("VPN_PORT", 40739))
 
-# Protocole (udp recommandé)
-VPN_PROTO = os.environ.get("VPN_PROTO", "udp")
+# Sous-réseau VPN
+VPN_SUBNET_CLIENT = os.environ.get("VPN_SUBNET", "10.8.0.0/24")
 
-# Sous-réseau virtuel VPN
-VPN_SUBNET = os.environ.get("VPN_SUBNET", "10.8.0.0")
-VPN_MASK   = os.environ.get("VPN_MASK",   "255.255.255.0")
-
-# Serveurs DNS poussés aux clients
-DNS1 = os.environ.get("DNS1", "1.1.1.1")
-DNS2 = os.environ.get("DNS2", "8.8.8.8")
-
-# IP publique du serveur (laisse vide pour auto-détection)
-SERVER_IP = os.environ.get("SERVER_IP", "")
-
-# Dossiers de travail (dans /home/container)
-WORKDIR   = "/home/container"
-CERTDIR   = f"{WORKDIR}/pki"
-CLIENTDIR = f"{WORKDIR}/clients"
-CONFDIR   = f"{WORKDIR}/conf"
-SERVER_CONF = f"{CONFDIR}/server.conf"
+# Dossiers de travail
+WORKDIR          = "/home/container"
+WG_CONF          = f"{WORKDIR}/conf/wg0.conf"
+SERVER_PRIVKEY_FILE = f"{WORKDIR}/keys/server_private"
+SERVER_PUBKEY_FILE  = f"{WORKDIR}/keys/server_public"
+CLIENT_PRIVKEY_FILE = f"{WORKDIR}/keys/client_private"
+CLIENT_PUBKEY_FILE  = f"{WORKDIR}/keys/client_public"
